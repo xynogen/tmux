@@ -1,0 +1,191 @@
+name: packages
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override package version (default: derived from configure.ac / tag)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.target.id }}
+    runs-on: ${{ matrix.target.runner }}
+    container:
+      image: ${{ matrix.target.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - id: debian12
+            image: debian:12
+            runner: docker
+            pkg: deb
+            iteration: 1debian12
+          - id: ubuntu2404
+            image: ubuntu:24.04
+            runner: docker
+            pkg: deb
+            iteration: 1ubuntu24.04
+          - id: fedora40
+            image: fedora:40
+            runner: docker
+            pkg: rpm
+            iteration: 1fc40
+
+    steps:
+      - name: Install base tooling (apt)
+        if: matrix.target.pkg == 'deb'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl \
+            build-essential autoconf automake pkg-config bison \
+            libevent-dev libncurses-dev libutempter-dev \
+            ruby ruby-dev rubygems
+          gem install --no-document fpm
+
+      - name: Install base tooling (dnf)
+        if: matrix.target.pkg == 'rpm'
+        run: |
+          dnf -y install \
+            git ca-certificates curl \
+            gcc make autoconf automake pkgconf-pkg-config bison \
+            libevent-devel ncurses-devel libutempter-devel \
+            ruby ruby-devel rubygems rpm-build
+          gem install --no-document fpm
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -eu
+          if [ -n "${{ inputs.version }}" ]; then
+            v="${{ inputs.version }}"
+          elif [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(awk '/^AC_INIT/ { gsub(/[][)(,]/, " "); print $3; exit }' configure.ac | sed 's/^next-//')"
+            v="${v}+git$(git rev-parse --short HEAD)"
+          fi
+          # fpm rejects '-' in deb versions; normalize
+          v_deb="$(echo "$v" | tr -- '-' '~')"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version_deb=$v_deb" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $v (deb: $v_deb)"
+
+      - name: Configure & build
+        run: |
+          set -eu
+          sh autogen.sh
+          ./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man
+          make -j"$(nproc)"
+
+      - name: Stage install
+        run: |
+          set -eu
+          rm -rf "$PWD/stage"
+          make install DESTDIR="$PWD/stage"
+          find stage -type f | head -n 50
+
+      - name: Package (deb)
+        if: matrix.target.pkg == 'deb'
+        run: |
+          set -eu
+          fpm -s dir -t deb \
+            -n tmux \
+            -v "${{ steps.ver.outputs.version_deb }}" \
+            --iteration "${{ matrix.target.iteration }}" \
+            --architecture native \
+            --maintainer "tmux packaging <packaging@localhost>" \
+            --description "Terminal multiplexer" \
+            --url "https://tmux.github.io/" \
+            --license "ISC" \
+            --depends "libc6" \
+            --depends "libevent-2.1-7" \
+            --depends "libtinfo6" \
+            --deb-no-default-config-files \
+            -C stage \
+            usr
+
+      - name: Package (rpm)
+        if: matrix.target.pkg == 'rpm'
+        run: |
+          set -eu
+          fpm -s dir -t rpm \
+            -n tmux \
+            -v "${{ steps.ver.outputs.version }}" \
+            --iteration "${{ matrix.target.iteration }}" \
+            --architecture native \
+            --maintainer "tmux packaging <packaging@localhost>" \
+            --description "Terminal multiplexer" \
+            --url "https://tmux.github.io/" \
+            --license "ISC" \
+            --depends "libevent" \
+            --depends "ncurses-libs" \
+            -C stage \
+            usr
+
+      - name: Collect artifacts
+        run: |
+          set -eu
+          mkdir -p dist
+          mv ./*.deb dist/ 2>/dev/null || true
+          mv ./*.rpm dist/ 2>/dev/null || true
+          ls -la dist
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: tmux-${{ matrix.target.id }}
+          path: dist/*
+
+  release:
+    name: attach-to-release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: docker
+    container:
+      image: debian:12
+    steps:
+      - name: Install tooling
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist
+
+      - name: Flatten
+        run: |
+          set -eu
+          mkdir -p out
+          find dist -type f \( -name '*.deb' -o -name '*.rpm' \) -exec cp -v {} out/ \;
+          ls -la out
+
+      - name: Publish to Forgejo release
+        uses: actions/forgejo-release@v2
+        with:
+          direction: upload
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-dir: out
+          tag: ${{ github.ref_name }}
+          override: true
