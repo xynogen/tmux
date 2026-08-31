@@ -2,58 +2,47 @@
 
 ## Repository nature
 
-This repo is a **personal fork** of upstream tmux, recompiled and packaged by the owner.
+This repository is a **public personal fork** of upstream tmux.
 
-- **`github` remote** → upstream: `https://github.com/tmux/tmux.git`
-- **`origin` remote** → owner's Forgejo: `https://forgejo.xynogen.xyz/xynogen/tmux.git`
+- **`upstream` remote** → `https://github.com/tmux/tmux.git`
+- **`origin` remote** → `https://github.com/xynogen/tmux.git`
 
-The owner regularly pulls from `github` (upstream) and merges into `origin` (their fork). The fork carries local patches — primarily CI/CD configuration for self-hosted Forgejo Actions producing `.deb` and `.rpm` artifacts attached to Forgejo Releases.
+The fork regularly merges `upstream/master` into `master`. Fork-only changes are packaging automation under `.github/workflows/packages.yml` and this file; prefer upstream for tmux source changes unless explicitly maintaining a local patch.
 
-## Merge instability
+## Merge guidance
 
-Pulling and merging upstream tmux into the fork is **mostly stable but watch these points**:
+1. Check `git log --oneline -20` before resolving post-merge problems.
+2. Preserve `.github/workflows/packages.yml` when merging upstream.
+3. Upstream churn is concentrated in `*.c`, `tmux.h`, `cmd-*.c`, `configure.ac`, and autotools files.
+4. If CI fails but a prior build worked, run `sh autogen.sh` from a clean tree before changing build logic.
+5. Recheck package dependencies when Ubuntu changes runtime library names.
 
-- Upstream is a C codebase with autotools; churn is concentrated in `*.c`, `tmux.h`, `cmd-*.c`, and `configure.ac`
-- The owner's patches live almost entirely under `.forgejo/` — collisions with upstream are rare but possible if upstream ever adds Forgejo/CI files
-- `configure.ac` `AC_INIT([tmux], next-X.Y)` version string is parsed by the workflow → upstream version bumps directly affect derived package versions when not tag-driven
-- `Makefile.am` / generated `Makefile` / `configure` script changes can break the `autogen.sh && ./configure && make` chain in CI; regenerate locally if you suspect autotools drift
+## Build and packaging
 
-### When helping with a post-merge issue
+Workflow: `.github/workflows/packages.yml`
 
-1. Always check `git log --oneline -20` first to see whether a merge commit is the source of the breakage.
-2. Treat anything under `.forgejo/` as **owner's local patches** — preserve them unless explicitly told otherwise. Upstream rarely touches this path.
-3. If the build fails in CI but works locally, suspect autotools cache or stale `configure` — run `sh autogen.sh` cleanly in the container.
-4. For packaging dep mismatches (`libevent`, `libtinfo`, `libutempter`), distro version bumps may rename runtime libs — adjust `--depends` in `.forgejo/workflows/packages.yml`.
+- Runner: GitHub-hosted `ubuntu-latest`
+- Build container: `ubuntu:24.04`
+- Build chain: `autogen.sh` → `./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man` → `make` → staged install
+- Packaging: `fpm` creates `.deb` and `.rpm` artifacts
+- Trigger: any tag push or manual `workflow_dispatch`
+- Release: tag runs create/update a GitHub Release and upload package artifacts
 
-## Build environment summary
+Version resolution priority:
 
-- Build targets (matrix): `debian:12`, `ubuntu:24.04`, `fedora:40` containers
-- Build chain: `autogen.sh` → `./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man` → `make` → `make install DESTDIR=stage`
-- Packaging tool: **fpm** (single tool, both `.deb` and `.rpm` outputs)
-- Trigger: git tag push (`on: push: tags: ["*"]`) + `workflow_dispatch` with optional version override
-- Release publishing: `actions/forgejo-release@v2` attaches artifacts to the tag's release
-- Runner: self-hosted Forgejo Actions runner (`runs-on: docker`)
+1. `workflow_dispatch.inputs.version`
+2. Tag name with leading `v` removed
+3. `configure.ac` version with `next-` removed, plus `+git<shortsha>`
 
-### Version resolution priority (CI)
+Debian versions replace `-` with `~` because `fpm` rejects `-` in Debian package versions.
 
-1. `workflow_dispatch.inputs.version` (manual override)
-2. Git tag name with leading `v` stripped (e.g. `v3.7` → `3.7`)
-3. Fallback: `configure.ac` `AC_INIT` version with `next-` prefix stripped + `+git<shortsha>`
+## Release safety
 
-Deb-side normalization: `-` → `~` (fpm rejects `-` in deb versions).
-
-### Triggering CI
+Pushing a tag triggers packaging and release publication. Never tag or push a tag without explicit confirmation. Before release, verify the tag does not already exist locally or on `origin`.
 
 ```sh
-git tag -a v3.7 -m "3.7"
-git push origin v3.7
+git tag -l "<version>"
+git ls-remote --tags origin "<version>"
 ```
 
-Or manually via Forgejo UI → Actions → packages → Run workflow.
-
-### Common gotchas
-
-- `actions/forgejo-release@v2` requires Forgejo ≥ 1.21
-- Runner labels: workflow uses `runs-on: docker`; adjust if runner registers different labels
-- Deb runtime deps pinned (`libevent-2.1-7`, `libtinfo6`) — verify after Debian/Ubuntu version bumps
-- `--architecture native` lets fpm pick `amd64`/`x86_64` from the runner; cross-arch builds require explicit overrides
+Common issue: Ubuntu 24.04 uses `libevent-2.1-7t64`; recheck pinned runtime dependencies after base-image upgrades.
