@@ -21,8 +21,7 @@ The fork regularly merges `upstream/master` into `master`. Fork-only changes are
 
 Workflow: `.github/workflows/packages.yml`
 
-- Runner: GitHub-hosted `ubuntu-latest`
-- Build container: `ubuntu:24.04`
+- Runner: GitHub-hosted `ubuntu-24.04`
 - Build chain: `autogen.sh` → `./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man` → `make` → staged install
 - Packaging: `fpm` creates `.deb` and `.rpm` artifacts
 - Trigger: any tag push or manual `workflow_dispatch`

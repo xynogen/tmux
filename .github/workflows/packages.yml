@@ -11,46 +11,37 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
-
 jobs:
   build:
     name: build-ubuntu2404
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:24.04
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - name: Install nodejs (required by actions/*)
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends nodejs ca-certificates
-
       - name: Install build & packaging tooling
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get install -y --no-install-recommends \
-            git curl \
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake pkg-config bison \
             libevent-dev libncurses-dev libutempter-dev \
             ruby ruby-dev rubygems rpm
-          gem install --no-document fpm
+          sudo gem install --no-document fpm
 
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Mark workspace safe for git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Resolve version
         id: ver
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -eu
-          if [ -n "${{ inputs.version }}" ]; then
-            v="${{ inputs.version }}"
+          if [ -n "$VERSION_INPUT" ]; then
+            v="$VERSION_INPUT"
           elif [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             v="${GITHUB_REF_NAME#v}"
           else
@@ -78,11 +69,13 @@ jobs:
           find stage -type f | head -n 50
 
       - name: Package (deb)
+        env:
+          VERSION_DEB: ${{ steps.ver.outputs.version_deb }}
         run: |
           set -eu
           fpm -s dir -t deb \
             -n tmux \
-            -v "${{ steps.ver.outputs.version_deb }}" \
+            -v "$VERSION_DEB" \
             --iteration "1ubuntu24.04" \
             --architecture native \
             --maintainer "tmux packaging <packaging@localhost>" \
@@ -97,12 +90,14 @@ jobs:
             usr
 
       - name: Package (rpm)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -eu
           fpm -s dir -t rpm \
             -n tmux \
-            -v "${{ steps.ver.outputs.version }}" \
-            --iteration "1ubuntu24.04" \
+            -v "$VERSION" \
+            --iteration "1" \
             --architecture native \
             --maintainer "tmux packaging <packaging@localhost>" \
             --description "Terminal multiplexer" \
@@ -115,14 +110,12 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          set -eu
           mkdir -p dist
-          mv ./*.deb dist/ 2>/dev/null || true
-          mv ./*.rpm dist/ 2>/dev/null || true
+          mv ./*.deb ./*.rpm dist/
           ls -la dist
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tmux-ubuntu2404
           path: dist/*
@@ -131,19 +124,13 @@ jobs:
     name: attach-to-release
     needs: build
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:24.04
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
     steps:
-      - name: Install nodejs (required by actions/*)
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends nodejs ca-certificates curl gh
-
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
 
