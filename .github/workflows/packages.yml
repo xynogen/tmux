@@ -12,8 +12,8 @@ on:
         type: string
 
 jobs:
-  build:
-    name: build-ubuntu2404
+  build-deb:
+    name: build-deb-ubuntu2404
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake pkg-config bison \
             libevent-dev libncurses-dev libutempter-dev \
-            ruby ruby-dev rubygems rpm
+            ruby ruby-dev rubygems
           sudo gem install --no-document fpm
 
       - name: Checkout
@@ -50,9 +50,8 @@ jobs:
           fi
           # fpm rejects '-' in deb versions; normalize
           v_deb="$(echo "$v" | tr -- '-' '~')"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "version_deb=$v_deb" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $v (deb: $v_deb)"
+          echo "Resolved deb version: $v_deb"
 
       - name: Configure & build
         run: |
@@ -89,6 +88,73 @@ jobs:
             -C stage \
             usr
 
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          mv ./*.deb dist/
+          ls -la dist
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tmux-deb-ubuntu2404
+          path: dist/*
+
+  build-rpm:
+    name: build-rpm-fedora
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install build & packaging tooling
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc make autoconf automake pkgconf-pkg-config bison \
+            libevent-devel ncurses-devel libutempter-devel \
+            ruby ruby-devel rubygems rpm-build git-core \
+            findutils gawk sed which
+          gem install --no-document fpm
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve version
+        id: ver
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -eu
+          if [ -n "$VERSION_INPUT" ]; then
+            v="$VERSION_INPUT"
+          elif [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(awk '/^AC_INIT/ { gsub(/[][)(,]/, " "); print $3; exit }' configure.ac | sed 's/^next-//')"
+            v="${v}+git$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved rpm version: $v"
+
+      - name: Configure & build
+        run: |
+          set -eu
+          sh autogen.sh
+          ./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man
+          make -j"$(nproc)"
+
+      - name: Stage install
+        run: |
+          set -eu
+          rm -rf "$PWD/stage"
+          make install DESTDIR="$PWD/stage"
+          find stage -type f | head -n 50
+
       - name: Package (rpm)
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -97,7 +163,7 @@ jobs:
           fpm -s dir -t rpm \
             -n tmux \
             -v "$VERSION" \
-            --iteration "1" \
+            --iteration "1.fc$(rpm -E %fedora)" \
             --architecture native \
             --maintainer "tmux packaging <packaging@localhost>" \
             --description "Terminal multiplexer" \
@@ -111,18 +177,18 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          mv ./*.deb ./*.rpm dist/
+          mv ./*.rpm dist/
           ls -la dist
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: tmux-ubuntu2404
+          name: tmux-rpm-fedora
           path: dist/*
 
   release:
     name: attach-to-release
-    needs: build
+    needs: [build-deb, build-rpm]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
